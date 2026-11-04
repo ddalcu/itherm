@@ -1,6 +1,6 @@
 cask "itherm" do
-  version "0.0.0"
-  sha256 "0000000000000000000000000000000000000000000000000000000000000000"
+  version "26.11.1"
+  sha256 "1e82b1464c621ed372ab99dce4c732fbca85885dc2c6e7bac2f82952e1d83e0d"
 
   url "https://github.com/ddalcu/itherm/releases/download/v#{version}/iTherm.dmg"
   name "iTherm"
