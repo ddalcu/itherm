@@ -1,0 +1,47 @@
+name: Homebrew
+
+# release.yml creates the release as a DRAFT, so its DMG isn't downloadable until someone publishes
+# it. The cask is only updated on that draft -> published transition, never before.
+on:
+  release:
+    types: [published]
+
+jobs:
+  update-cask:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      # A release event checks out the TAG by default; the cask commit belongs on main.
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Download release DMG
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release download "${{ github.event.release.tag_name }}" --repo "${{ github.repository }}" --pattern iTherm.dmg
+
+      - name: Update cask
+        run: |
+          VERSION="${{ github.event.release.tag_name }}"
+          VERSION="${VERSION#v}"
+          sed -i "s/^  version \".*\"/  version \"$VERSION\"/; s/^  sha256 \".*\"/  sha256 \"$(shasum -a 256 iTherm.dmg | awk '{print $1}')\"/" Casks/itherm.rb
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Casks/itherm.rb
+          git commit -m "brew: update to v$VERSION"
+
+          # Retry with rebase in case main advanced meanwhile
+          for i in 1 2 3 4 5; do
+            git push origin HEAD:main && exit 0
+            echo "push attempt $i rejected; rebasing on latest main and retrying..."
+            git fetch origin main
+            git rebase origin/main
+            sleep $((i * 2))
+          done
+          echo "failed to push cask update after 5 attempts" >&2
+          exit 1

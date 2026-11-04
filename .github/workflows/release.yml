@@ -1,0 +1,111 @@
+name: Release
+
+# Run manually (Actions > Release > Run workflow). Builds, signs with Developer ID, notarizes and
+# staples iTherm.app, packs iTherm.dmg, and creates a DRAFT release tagged v<YY.M.N>. Publishing
+# the draft fires homebrew.yml, which updates the cask. Needs these repo secrets:
+# APPLE_CERTIFICATE_BASE64, APPLE_CERTIFICATE_PASSWORD, APPLE_ID, APPLE_ID_PASSWORD, APPLE_TEAM_ID.
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Build, sign and package only: skip notarization and the release (the DMG is uploaded as a workflow artifact)."
+        type: boolean
+        default: false
+
+jobs:
+  release:
+    runs-on: macos-26
+    timeout-minutes: 45
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Import signing certificate
+        env:
+          APPLE_CERTIFICATE_BASE64: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+        run: |
+          KEYCHAIN_PATH=$RUNNER_TEMP/signing.keychain-db
+          KEYCHAIN_PASSWORD=$(openssl rand -hex 16)
+
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+
+          echo "$APPLE_CERTIFICATE_BASE64" | base64 --decode > $RUNNER_TEMP/certificate.p12
+          security import $RUNNER_TEMP/certificate.p12 \
+            -P "$APPLE_CERTIFICATE_PASSWORD" \
+            -A \
+            -f pkcs12 \
+            -k "$KEYCHAIN_PATH"
+
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security list-keychains -d user -s "$KEYCHAIN_PATH" login.keychain-db
+          security find-identity -v -p codesigning "$KEYCHAIN_PATH"
+
+      # CalVer YY.M.N: N counts up from the last vYY.M.* release. The month comes from one pinned zone
+      # (runners are UTC, so near a month boundary the two clocks would disagree).
+      - name: Extract version
+        id: version
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TZ: America/New_York
+        run: |
+          PREFIX="$(date +%y.%-m)"
+          LAST_N=$(gh release list --limit 100 --json tagName \
+            --jq "[.[] | .tagName | select(test(\"^v${PREFIX}\\\\.[0-9]+$\")) | sub(\"^v${PREFIX}\\\\.\"; \"\") | tonumber] | max // 0")
+          echo "version=${PREFIX}.$((LAST_N + 1))" >> "$GITHUB_OUTPUT"
+
+      - name: Build and sign
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          SIGN_IDENTITY: "Developer ID Application: David Dalcu (${{ secrets.APPLE_TEAM_ID }})"
+        run: |
+          ./bundle.sh
+          codesign --verify --deep --strict --verbose=2 build/iTherm.app
+          ditto -c -k --keepParent build/iTherm.app iTherm-app.zip
+
+      - name: Notarize and staple
+        if: ${{ !inputs.dry_run }}
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_ID_PASSWORD: ${{ secrets.APPLE_ID_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          xcrun notarytool submit iTherm-app.zip \
+            --apple-id "$APPLE_ID" \
+            --password "$APPLE_ID_PASSWORD" \
+            --team-id "$APPLE_TEAM_ID" \
+            --wait
+          xcrun stapler staple build/iTherm.app
+
+      - name: Create DMG
+        run: bash scripts/create-dmg.sh build/iTherm.app iTherm.dmg
+
+      - name: Cleanup keychain
+        if: always()
+        run: security delete-keychain $RUNNER_TEMP/signing.keychain-db || true
+
+      # A draft: homebrew.yml waits for it to be published, so the cask never points at a download
+      # nobody can reach yet. The tag is created when it is published.
+      - name: Create release
+        if: ${{ !inputs.dry_run }}
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.version.outputs.version }}
+          target_commitish: ${{ github.sha }}
+          name: iTherm v${{ steps.version.outputs.version }}
+          generate_release_notes: true
+          draft: true
+          files: iTherm.dmg
+
+      - name: Upload dry-run artifact
+        if: ${{ inputs.dry_run }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: iTherm-${{ steps.version.outputs.version }}
+          path: iTherm.dmg
+          retention-days: 7

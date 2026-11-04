@@ -1,0 +1,29 @@
+name: CI
+
+# Builds the app on every PR and main push: a compile error or a broken bundle.sh fails here,
+# not at release time. Unsigned (ad-hoc); release.yml signs and notarizes.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: macos-26
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build app bundle
+        run: ./bundle.sh
+
+      - name: Verify bundle
+        run: |
+          codesign --verify --deep --strict --verbose=2 build/iTherm.app
+          plutil -lint build/iTherm.app/Contents/Info.plist
