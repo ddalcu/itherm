@@ -7,7 +7,7 @@ cask "itherm" do
   desc "Terminal for benchmarking: live temps, power and fans, and no GPU use"
   homepage "https://github.com/ddalcu/itherm"
 
-  depends_on macos: ">= :sonoma"
+  depends_on macos: :sonoma
   depends_on arch: :arm64
 
   app "iTherm.app"
